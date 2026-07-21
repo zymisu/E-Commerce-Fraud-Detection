@@ -1,0 +1,61 @@
+# Hạ tầng Kafka cho hệ thống phát hiện gian lận thời gian thực
+# Dùng image CHÍNH THỨC apache/kafka, chạy chế độ KRaft (không cần Zookeeper).
+#
+# Khởi động : docker compose up -d
+# Dừng      : docker compose down          (giữ dữ liệu)
+# Dọn sạch  : docker compose down -v        (xoá cả volume)
+#
+# Hai listener:
+#   - EXTERNAL (localhost:9092): cho producer.py & Spark chạy trên host
+#   - INTERNAL (kafka:9094)    : cho các container khác (kafka-init, healthcheck)
+
+services:
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: fraud-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # --- KRaft: broker kiêm controller ---
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      # --- 3 listener: EXTERNAL (host), INTERNAL (container), CONTROLLER ---
+      KAFKA_LISTENERS: "EXTERNAL://:9092,INTERNAL://:9094,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "EXTERNAL://localhost:9092,INTERNAL://kafka:9094"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      # --- Cấu hình 1 node (replication factor = 1) ---
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9094 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+
+  # Service phụ (chạy 1 lần): tạo sẵn 2 topic trước khi demo
+  kafka-init:
+    image: apache/kafka:3.7.0
+    container_name: fraud-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command: |
+      "
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9094 --create --if-not-exists --topic transactions --partitions 3 --replication-factor 1
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9094 --create --if-not-exists --topic fraud-alerts  --partitions 3 --replication-factor 1
+      echo '--- Danh sach topic hien co ---'
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9094 --list
+      "
+
+volumes:
+  kafka_data:
+    driver: local
